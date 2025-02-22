@@ -19,10 +19,17 @@ let cssConfig = vscode.workspace.getConfiguration().get('umath.preview.customCSS
 // handle MathJax error. Reload on error once.
 let onError = false;
 let resetError = false;
-let e_temp;
-let Height;
 
-const defaultMaxHeight = 'max-height: 45em;'
+
+let e_temp;
+let Height; // svgString Height
+const defaultMaxHeight = 'max-height: 45em;';
+/**
+ * Precompiled regular expression for matching SVG height attributes.
+ * Optimized for case-insensitive matching of height values with optional units.
+ * @constant {RegExp}
+ */
+const SVG_HEIGHT_REGEX = /height\s*=\s*["']([\d.]+)(ex|em|px)?["']/i;
 
 /**
  * @param {vscode.ExtensionContext} context
@@ -116,6 +123,7 @@ function setPreview(document, position) {
 
     // get vscode workspace line height Configuration
     let lineHeightConfig = vscode.workspace.getConfiguration('editor').get('lineHeight');
+    const fontSize = vscode.workspace.getConfiguration('editor').get('fontSize');
 
     if (lineHeightConfig === 0 || lineHeightConfig === undefined || lineHeightConfig === null) {
         lineHeightConfig = 1.2;
@@ -123,24 +131,28 @@ function setPreview(document, position) {
 
     const { MaxHeightValue, Unit } = getMaxHeightValueAndUnit(defaultMaxHeight + cssConfig);
 
-    renderAndGetHeightInEm().then(height => {
-        if (height == 'undefined') return
-
-        // Unit only supports 'em' and 'px'
-        if (Unit == 'em') {
-            Height = Math.min(MaxHeightValue, svgHeight);
-        } else if (Unit == 'px') {
-            const fontSize = vscode.workspace.getConfiguration('editor').get('fontSize');
-            Height = Math.min(MaxHeightValue / fontSize, svgHeight);
-        } else {
-            console.log('Units are not matched')
-            Height = 30;
+    let lineHeight
+    (async () => {
+        try {
+            if (typeof height === 'undefined') return;
+            // Custom Config Unit only supports 'em' and 'px'
+            let finalHeight;
+            switch (Unit.toLowerCase()) {
+                case 'em':
+                    finalHeight = Math.min(MaxHeightValue, height);
+                    break;
+                case 'px':
+                    finalHeight = Math.min(MaxHeightValue / fontSize, height);
+                    break;
+                default:
+                    console.warn(`Unsupported unit: ${Unit}`);
+                    finalHeight = 30;
+            }
+            lineHeight = Math.ceil(MaxHeightValue / lineHeightConfig);
+        } catch (error) {
+            console.error("Main Process Error:", error);
         }
-    }).catch(error => {
-        console.error("Error rendering SVG:", error);
-    })
-
-    const lineHeight = Math.ceil(MaxHeightValue / lineHeightConfig);
+    })();
 
     // ensure that the InstLine is within the current visible range
     const candidate = positionConfig === 'bottom'
@@ -273,42 +285,59 @@ function getMaxHeightValueAndUnit(cssString) {
 }
 
 /**
- * Asynchronously renders a mathematical expression to an SVG string,
- * converts the SVG's height from `ex` units to `em` units (assuming a 1:2 ratio),
- * and returns the rounded up result.
- *
+ * Asynchronously renders mathematical expression to SVG and calculates height.
+ * Converts final height to em units using 1em=2ex ratio with ceiling rounding.
  * @async
  * @function renderAndGetHeightInEm
- * @returns {number|undefined} The SVG's height in `em` units (rounded up)
- *                             or undefined if an error occurs during rendering.
+ * @param {string} mathExpression - LaTeX mathematical expression to render
+ * @param {Object} testScope - Rendering context with display math flag
+ * @param {number} fontSize - Current editor font size in px
+ * @returns {Promise<number|undefined>} Height in em units or undefined on error
  */
-async function renderAndGetHeightInEm() {
-    let svgHeightInEm;
+async function renderAndGetHeightInEm(mathExpression, testScope, fontSize) { // 增加 fontSize 参数
     try {
-        const svgString_temp = await texRenderer[rendererConfig](mathExpression, testScope.isDisplayMath);
-        if (!svgString_temp.includes("error")) {
-            /**
-             * Assumes the SVG height is given in `ex` units and converts it to `em` units
-             * by dividing by 2 (since 1 `em` is assumed to be twice the size of 1 `ex` here).
-             * The result is then rounded up using Math.ceil to ensure it is a whole number.
-             */
-            svgHeightInEm = Math.ceil(getSvgHeight(svgString_temp) / 2);
-        }
+        const svgString = await texRenderer[rendererConfig](mathExpression, testScope.isDisplayMath);
+
+        // 快速失败：包含错误直接返回 undefined
+        if (svgString.includes("error")) return;
+
+        // 合并计算步骤
+        return Math.ceil(getSvgHeight(svgString, fontSize) / 2);
     } catch (error) {
-        console.error("Error rendering SVG:", error);
+        console.error("Rendering failed:", error);
+        return; // 明确返回 undefined
     }
-    return svgHeightInEm;
 }
 
-function getSvgHeight(svgString) {
-    // Resolve the explicit height property
-    const heightMatch = svgString.match(/height\s*=\s*["']([^%]+?)["']/i);
-    if (heightMatch) {
-        return parseFloat(heightMatch[1]); //
-    }
-    // If not found, return the default value
-    return 24;
+/**
+ * Extracts and converts SVG height value from SVG string.
+ * Supports ex, em, and px units. Returns default height if not found.
+ * @function getSvgHeight
+ * @param {string} svgString - SVG markup string to analyze
+ * @param {number} fontSize - Current editor font size in px
+ * @returns {number} Height value in ex units (default: 24ex)
+ */
+function getSvgHeight(svgString, fontSize) {
+    const match = svgString.match(SVG_HEIGHT_REGEX);
+    if (!match) return 24; // If not found, return the default value
+
+    const [_, valueStr, unit = 'ex'] = match;
+    const value = parseFloat(valueStr);
+
+    // Convert unit to EX
+    return unitConverter[unit.toLowerCase()]?.(value, fontSize) ?? value;
 }
+
+/**
+ * Unit conversion utilities for SVG height values.
+ * Provides conversion methods between ex, em, and px units.
+ * @constant {Object.<string, Function>}
+ */
+const unitConverter = {
+    ex: (val) => val,
+    em: (val) => val * 2,
+    px: (val, fontSize) => val / fontSize * 2
+};
 /////////////////////////////////////////////////////////
 
 function clearPreview() {
